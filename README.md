@@ -124,3 +124,17 @@ Adds a **Send File(s)…** button to both desktop windows. Select one or more fi
 Both computers must use the v0.7.0 source folder for file transfer. The feature uses the existing authenticated TCP connection and protocol; it does not require cloud services or another port. The protocol remains unencrypted, so use FlowSwitch only on a trusted private LAN and never port-forward port 24800 to the internet. Only send files to a computer you trust. No drag-and-drop support yet; the first version uses the Send File(s)… file picker.
 
 This version is syntax-checked and its chunked transfer protocol was exercised using paired in-process transfer managers, including a multi-chunk file and filename collision handling. Actual end-to-end file transfer between physical Windows and macOS machines still needs user testing.
+
+
+## v0.7.1 — Drag-and-drop into the app
+
+Both desktop apps now include a drop zone. Drag one or more regular files from Windows File Explorer or macOS Finder into the FlowSwitch drop area to queue them for transfer to the connected computer. The existing **Send File(s)…** picker remains available as a fallback. Folder drops are not supported in this version.
+
+Install the updated platform requirements on both computers so `tkinterdnd2` is available. Start the apps using the new v0.7.1 source folder on both sides. If the drag-and-drop dependency is missing, the app will still start and the file picker remains available, but the drop zone will display an installation hint. This version only supports dropping files into the FlowSwitch application; dragging across the remote desktop is a later milestone.
+
+
+## v0.7.2 — TkDND startup compatibility fix
+
+Some macOS Python 3.14 installations use a Tcl/Tk runtime that is incompatible with the native extension bundled by `tkinterdnd2` (error text may say the extension was compiled for Tcl 8.x). The GUI now catches that startup failure and falls back to standard Tk so FlowSwitch still opens and the **Send File(s)…** picker remains usable. In this fallback mode, drag-and-drop into the app is disabled.
+
+To use app-window drag-and-drop, use a compatible Python distribution with Tcl/Tk 8.6; Python 3.12 from python.org is the recommended first option to try on macOS. Create a fresh virtual environment with that interpreter, install `requirements-mac.txt`, and launch `mac_app.py` from the new environment. Python 3.14 compatibility with `tkinterdnd2` depends on the Tcl/Tk build and is not guaranteed.

@@ -3,6 +3,15 @@ import queue
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
+from pathlib import Path
+
+try:
+    from tkinterdnd2 import DND_FILES, TkinterDnD
+    DND_AVAILABLE = True
+except ImportError:
+    DND_FILES = None
+    TkinterDnD = None
+    DND_AVAILABLE = False
 
 from controller import FlowSwitchController, PORT
 
@@ -11,8 +20,8 @@ class WindowsApp:
     def __init__(self, root):
         self.root = root
         self.root.title("FlowSwitch — Windows Controller")
-        self.root.geometry("480x470")
-        self.root.minsize(440, 440)
+        self.root.geometry("480x540")
+        self.root.minsize(440, 500)
         self.messages = queue.Queue()
         self.controller = None
         self.worker = None
@@ -41,6 +50,17 @@ class WindowsApp:
         file_frame = ttk.LabelFrame(frame, text="File transfer", padding=10)
         file_frame.pack(fill="x", pady=(16, 0))
         ttk.Label(file_frame, text="Incoming files are saved to your Downloads folder by default.", wraplength=400).pack(anchor="w")
+        self.drop_zone = ttk.Label(
+            file_frame,
+            text=("Drop files here to send to your Mac" if DND_AVAILABLE else
+                  "Drag-and-drop unavailable — install requirements-windows.txt"),
+            anchor="center", justify="center", padding=14, relief="groove",
+        )
+        self.drop_zone.pack(fill="x", pady=(8, 0))
+        if DND_AVAILABLE:
+            for widget in (file_frame, self.drop_zone):
+                widget.drop_target_register(DND_FILES)
+                widget.dnd_bind("<<Drop>>", self.on_files_dropped)
         file_buttons = ttk.Frame(file_frame)
         file_buttons.pack(fill="x", pady=(8, 0))
         ttk.Button(file_buttons, text="Send File(s)…", command=self.send_files).pack(side="left", fill="x", expand=True)
@@ -92,6 +112,25 @@ class WindowsApp:
                 self.controller.file_transfer.set_download_dir(folder)
             self.status.set(f"Incoming files will be saved to: {folder}")
 
+    def on_files_dropped(self, event):
+        try:
+            paths = [str(Path(p)) for p in self.root.tk.splitlist(event.data)]
+        except Exception as exc:
+            self.status.set(f"Couldn't read dropped files: {exc}")
+            return "break"
+        if not paths:
+            return "break"
+        if not self.controller or not self.worker or not self.worker.is_alive():
+            self.status.set("Connect to your Mac before dropping files to send.")
+            return "break"
+        files = [p for p in paths if Path(p).is_file()]
+        if not files:
+            self.status.set("Drop files, not folders, to transfer them.")
+            return "break"
+        self.controller.file_transfer.send_files(files)
+        self.status.set(f"Queued {len(files)} file(s) for transfer to your Mac…")
+        return "copy"
+
     def send_files(self):
         paths = filedialog.askopenfilenames(title="Choose files to send", parent=self.root)
         if not paths:
@@ -132,6 +171,19 @@ class WindowsApp:
 
 
 if __name__ == "__main__":
-    root = tk.Tk()
+    # tkinterdnd2 bundles a native TkDND extension built for Tcl/Tk 8.x.
+    # Some Python builds (notably some Python 3.14 macOS builds) use a newer
+    # Tcl/Tk runtime, which can make TkinterDnD.Tk() fail during startup.
+    # Fall back to standard Tk so the app and file-picker transfer still work.
+    if DND_AVAILABLE:
+        try:
+            root = TkinterDnD.Tk()
+        except Exception as exc:
+            DND_AVAILABLE = False
+            print(f"FlowSwitch: native drag-and-drop unavailable: {exc}")
+            print("Use Python 3.12/3.13 with a compatible Tcl/Tk 8.6 build to enable drag-and-drop.")
+            root = tk.Tk()
+    else:
+        root = tk.Tk()
     WindowsApp(root)
     root.mainloop()
