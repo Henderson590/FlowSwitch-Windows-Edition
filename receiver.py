@@ -51,7 +51,10 @@ def handle_event(event):
     global remote_mode, edge_armed
     kind = event.get("type")
 
-    if kind == "enter":
+    if kind == "ping":
+        send_to_controller({"type": "pong"})
+
+    elif kind == "enter":
         with state_lock:
             remote_mode = True
             edge_armed = False
@@ -156,7 +159,8 @@ def client_session(conn, expected_token):
             with state_lock:
                 remote_mode = False
                 edge_armed = False
-            active_connection = None
+            if active_connection is conn:
+                active_connection = None
             release_all()
             print("Controller disconnected; released held keys/buttons.")
 

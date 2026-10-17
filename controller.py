@@ -2,7 +2,9 @@
 import argparse
 import ctypes
 import json
+import queue
 import socket
+import signal
 import threading
 import time
 from ctypes import wintypes
@@ -20,6 +22,9 @@ WM_SYSKEYDOWN, WM_SYSKEYUP = 0x0104, 0x0105
 WH_KEYBOARD_LL, WH_MOUSE_LL = 13, 14
 LLMHF_INJECTED, LLKHF_INJECTED = 0x00000001, 0x00000010
 HOTKEY = "Ctrl + Alt + F12"
+HEARTBEAT_INTERVAL = 0.5
+HEARTBEAT_TIMEOUT = 2.0
+OUTBOUND_QUEUE_LIMIT = 1000
 
 # Use WinDLL with use_last_error=True so ctypes can retrieve
 # the actual Windows error when an API call fails.
@@ -117,6 +122,9 @@ user32.SetCursorPos.restype = wintypes.BOOL
 user32.ShowCursor.argtypes = [wintypes.BOOL]
 user32.ShowCursor.restype = ctypes.c_int
 
+user32.PostQuitMessage.argtypes = [ctypes.c_int]
+user32.PostQuitMessage.restype = None
+
 
 VK_NAMES = {
     0x08: "Key.backspace",
@@ -197,8 +205,13 @@ class FlowSwitchController:
         self.token = token
 
         self.sock = None
+        self.sock_file = None
         self.sock_lock = threading.Lock()
         self.state_lock = threading.RLock()
+        self.outbound_queue = queue.Queue(maxsize=OUTBOUND_QUEUE_LIMIT)
+        self.shutdown_event = threading.Event()
+        self.connection_dead = False
+        self.last_pong = time.monotonic()
 
         self.active = False
         self.last_toggle = 0.0
@@ -226,22 +239,81 @@ class FlowSwitchController:
         self.keyboard_callback = HOOKPROC(self._keyboard_hook_proc)
 
     def send(self, payload):
-        with self.sock_lock:
-            if self.sock is None:
-                return False
+        """Queue a protocol message quickly; hook callbacks never block on TCP."""
+        if self.connection_dead or self.sock is None:
+            return False
+        try:
+            self.outbound_queue.put_nowait(payload)
+            return True
+        except queue.Full:
+            self.connection_lost("outbound queue overloaded")
+            return False
+
+    def _writer_loop(self):
+        """Serialize all protocol writes on a worker thread."""
+        while not self.shutdown_event.is_set():
+            try:
+                payload = self.outbound_queue.get(timeout=0.25)
+            except queue.Empty:
+                continue
+
+            with self.sock_lock:
+                sock = self.sock
+            if sock is None or self.connection_dead:
+                return
 
             try:
                 data = (
                     json.dumps(payload, separators=(",", ":")) + "\n"
                 ).encode("utf-8")
-                self.sock.sendall(data)
-                return True
+                sock.sendall(data)
             except OSError as exc:
-                print(f"Connection lost: {exc}")
-                self.sock = None
+                if not self.shutdown_event.is_set():
+                    self.connection_lost(f"send failed: {exc}")
+                return
+            finally:
+                self.outbound_queue.task_done()
 
-        self.set_active(False, move_to_edge=False)
-        return False
+    def connection_lost(self, reason):
+        """Fail closed: stop suppressing local input before doing I/O cleanup."""
+        with self.sock_lock:
+            if self.connection_dead:
+                return
+            self.connection_dead = True
+            sock = self.sock
+            sock_file = self.sock_file
+            self.sock = None
+            self.sock_file = None
+
+        # This transition is deliberately local-only. Once the connection is
+        # gone, do not try to send releases over a dead socket.
+        self.force_local_control(send_releases=False)
+        print(f"\nFlowSwitch connection lost ({reason}). Windows input restored.")
+
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+    def force_local_control(self, send_releases=True):
+        """Always restore the local cursor and let physical input pass through."""
+        with self.state_lock:
+            was_active = self.active
+            self.active = False
+            self.show_cursor()
+            if not send_releases or self.connection_dead:
+                self.remote_keys.clear()
+
+        if send_releases and not self.connection_dead:
+            self.send_release_all()
+
+        if was_active:
+            print("Remote input OFF — control returned to Windows.")
 
     def hide_cursor(self):
         if not self.cursor_hidden:
@@ -259,51 +331,51 @@ class FlowSwitchController:
         user32.SetCursorPos(int(x), int(y))
 
     def set_active(self, enabled, move_to_edge=True):
+        if enabled and (self.connection_dead or self.sock is None):
+            return
+
         with self.state_lock:
             if self.active == enabled:
                 return
+            if enabled and (self.connection_dead or self.sock is None):
+                return
 
             self.active = enabled
-
             if enabled:
                 self.hide_cursor()
                 self.warp_cursor(*self.center)
-                self.send({"type": "enter"})
-                print(
-                    "Remote input ON — move to the Mac's "
-                    "left edge to return."
-                )
             else:
                 self.show_cursor()
-
                 if move_to_edge:
                     self.warp_cursor(
                         self.screen_w - 3,
-                        max(
-                            1,
-                            min(self.screen_h - 2, self.return_y),
-                        ),
+                        max(1, min(self.screen_h - 2, self.return_y)),
                     )
 
-                self.send_release_all()
-                print("Remote input OFF — control returned to Windows.")
+        # Do all network I/O after releasing state_lock. This avoids lock-order
+        # deadlocks when the reader and low-level hook callbacks run together.
+        if enabled:
+            if not self.send({"type": "enter"}):
+                self.force_local_control(send_releases=False)
+                return
+            print("Remote input ON — move to the Mac's left edge to return.")
+        else:
+            self.send_release_all()
+            print("Remote input OFF — control returned to Windows.")
 
     def send_release_all(self):
-        # Release the exact key IDs that were sent to the receiver.
-        for key_id in list(self.remote_keys):
-            self.send({
-                "type": "key_up",
-                "key": key_id,
-            })
-            self.remote_keys.discard(key_id)
+        with self.state_lock:
+            keys = list(self.remote_keys)
+            self.remote_keys.clear()
 
-        # Release any remote mouse buttons that might remain held.
+        for key_id in keys:
+            if not self.send({"type": "key_up", "key": key_id}):
+                return
         for button in ("left", "right", "middle"):
-            self.send({
-                "type": "click",
-                "button": button,
-                "action": "up",
-            })
+            if not self.send({
+                "type": "click", "button": button, "action": "up"
+            }):
+                return
 
     def toggle(self):
         now = time.monotonic()
@@ -355,6 +427,10 @@ class FlowSwitchController:
                 if x >= self.screen_w - 2:
                     self.return_y = y
                     self.set_active(True)
+                    if not self.active:
+                        return user32.CallNextHookEx(
+                            self.mouse_hook, n_code, w_param, l_param
+                        )
                     return 1
 
                 return user32.CallNextHookEx(
@@ -365,14 +441,19 @@ class FlowSwitchController:
             dx, dy = x - cx, y - cy
 
             if dx or dy:
-                self.send({
+                if not self.send({
                     "type": "move",
                     "dx": dx,
                     "dy": dy,
-                })
+                }) or not self.active:
+                    return user32.CallNextHookEx(
+                        self.mouse_hook, n_code, w_param, l_param
+                    )
                 self.warp_cursor(cx, cy)
 
-            return 1
+            return 1 if self.active else user32.CallNextHookEx(
+                self.mouse_hook, n_code, w_param, l_param
+            )
 
         with self.state_lock:
             active = self.active
@@ -384,21 +465,27 @@ class FlowSwitchController:
 
         if msg in BUTTON_MESSAGES:
             button, action = BUTTON_MESSAGES[msg]
-            self.send({
+            if not self.send({
                 "type": "click",
                 "button": button,
                 "action": action,
-            })
+            }) or not self.active:
+                return user32.CallNextHookEx(
+                    self.mouse_hook, n_code, w_param, l_param
+                )
             return 1
 
         if msg in (WM_MOUSEWHEEL, WM_MOUSEHWHEEL):
             amount = signed_word(data.mouseData >> 16)
 
-            self.send({
+            if not self.send({
                 "type": "scroll",
                 "dx": amount if msg == WM_MOUSEHWHEEL else 0,
                 "dy": amount if msg == WM_MOUSEWHEEL else 0,
-            })
+            }) or not self.active:
+                return user32.CallNextHookEx(
+                    self.mouse_hook, n_code, w_param, l_param
+                )
             return 1
 
         return user32.CallNextHookEx(
@@ -463,30 +550,67 @@ class FlowSwitchController:
                     "type": "key_down",
                     "key": key_id,
                 }):
-                    self.remote_keys.add(key_id)
+                    with self.state_lock:
+                        if self.active:
+                            self.remote_keys.add(key_id)
             else:
                 self.send({
                     "type": "key_up",
                     "key": key_id,
                 })
-                self.remote_keys.discard(key_id)
+                with self.state_lock:
+                    self.remote_keys.discard(key_id)
 
-        # Suppress local typing while remote mode is active.
+        # If a disconnect happened during forwarding, do not swallow this
+        # physical event; subsequent events are also passed to Windows.
+        if not self.active:
+            return user32.CallNextHookEx(
+                self.keyboard_hook, n_code, w_param, l_param
+            )
         return 1
 
     def _read_receiver_lines(self, file):
         try:
             for line in file:
+                if not line:
+                    break
                 try:
                     message = json.loads(line)
                 except json.JSONDecodeError:
                     continue
 
-                if message.get("type") == "edge_exit":
+                kind = message.get("type")
+                if kind == "edge_exit":
                     self.set_active(False)
+                elif kind == "pong":
+                    self.last_pong = time.monotonic()
+        except (OSError, ValueError) as exc:
+            if not self.shutdown_event.is_set():
+                self.connection_lost(f"receiver read failed: {exc}")
+        finally:
+            try:
+                file.close()
+            except (OSError, ValueError):
+                pass
 
-        except (OSError, ValueError):
-            pass
+        if not self.shutdown_event.is_set():
+            self.connection_lost("receiver closed the connection")
+
+    def _heartbeat_loop(self):
+        while not self.shutdown_event.wait(HEARTBEAT_INTERVAL):
+            if self.connection_dead:
+                return
+            if time.monotonic() - self.last_pong > HEARTBEAT_TIMEOUT:
+                self.connection_lost("heartbeat timed out")
+                return
+            if not self.send({"type": "ping"}):
+                return
+
+    @staticmethod
+    def _sigint_handler(signum, frame):
+        # Do not raise KeyboardInterrupt from inside a ctypes hook callback.
+        # Posting WM_QUIT lets the message loop exit and run normal cleanup.
+        user32.PostQuitMessage(0)
 
     def run(self):
         print(f"Connecting to {self.host}:{self.port} ...")
@@ -508,6 +632,7 @@ class FlowSwitchController:
         file = self.sock.makefile(
             "r", encoding="utf-8", newline="\n"
         )
+        self.sock_file = file
 
         response = file.readline()
 
@@ -516,10 +641,22 @@ class FlowSwitchController:
             self.sock = None
             raise RuntimeError("Receiver rejected the token.")
 
+        self.last_pong = time.monotonic()
+        threading.Thread(
+            target=self._writer_loop,
+            daemon=True,
+            name="FlowSwitchSocketWriter",
+        ).start()
         threading.Thread(
             target=self._read_receiver_lines,
             args=(file,),
             daemon=True,
+            name="FlowSwitchReceiverReader",
+        ).start()
+        threading.Thread(
+            target=self._heartbeat_loop,
+            daemon=True,
+            name="FlowSwitchHeartbeat",
         ).start()
 
         module = kernel32.GetModuleHandleW(None)
@@ -563,6 +700,7 @@ class FlowSwitchController:
         print(f"Fallback toggle: {HOTKEY}. Move to the Mac's left edge to return.")
 
         msg = wintypes.MSG()
+        signal.signal(signal.SIGINT, self._sigint_handler)
 
         try:
             while True:
@@ -577,23 +715,20 @@ class FlowSwitchController:
                         "GetMessageW failed: "
                         + ctypes.FormatError(error).strip(),
                     )
-
                 if result == 0:
                     break
 
                 user32.TranslateMessage(ctypes.byref(msg))
                 user32.DispatchMessageW(ctypes.byref(msg))
 
-        except KeyboardInterrupt:
-            pass
-
         finally:
-            self.set_active(False, move_to_edge=False)
+            self.shutdown_event.set()
+            # Restore local input before removing hooks or closing the socket.
+            self.force_local_control(send_releases=not self.connection_dead)
 
             if self.mouse_hook:
                 user32.UnhookWindowsHookEx(self.mouse_hook)
                 self.mouse_hook = None
-
             if self.keyboard_hook:
                 user32.UnhookWindowsHookEx(self.keyboard_hook)
                 self.keyboard_hook = None
@@ -601,12 +736,18 @@ class FlowSwitchController:
             self.show_cursor()
 
             with self.sock_lock:
-                if self.sock:
-                    try:
-                        self.sock.close()
-                    except OSError:
-                        pass
-                    self.sock = None
+                sock = self.sock
+                self.sock = None
+                self.sock_file = None
+            if sock is not None:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                try:
+                    sock.close()
+                except OSError:
+                    pass
 
 
 def main():

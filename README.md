@@ -1,39 +1,31 @@
-# FlowSwitch 0.3 — input-hook experiment
+# FlowSwitch v0.4 — Failsafe patch
 
-This version replaces the `pynput` mouse listener on Windows with low-level Windows input hooks. It filters synthetic cursor-reposition events, suppresses local mouse movement/clicks while controlling the Mac, and sends relative motion based on the Windows cursor's position around the screen center. Keyboard events are also suppressed on Windows during remote mode.
+This patch updates the Windows controller and Mac receiver to improve recovery when the TCP connection or receiver disappears.
 
-## Setup
+## Safety changes
 
-Keep using your existing `pynput` install on the Mac; the receiver still uses it. On Windows, `pynput` is no longer needed for the controller, but leaving it installed is harmless.
+- Windows input hooks no longer perform TCP writes directly. Events are queued for a dedicated socket-writer thread so a slow connection is less likely to stall a low-level input callback.
+- The Windows controller detects socket write errors, receiver EOF, and missing heartbeat replies. On connection loss it marks remote mode inactive and restores the local cursor so physical Windows input is passed through.
+- Heartbeats run every 0.5 seconds; the controller treats a missing pong for 2 seconds as a failed connection. A direct socket failure or EOF is handled sooner.
+- The Mac replies to heartbeat pings and continues releasing held keys and mouse buttons in the client-session cleanup path when the connection ends.
+- Ctrl+C posts a Windows quit message instead of raising `KeyboardInterrupt` inside a `ctypes` callback.
+- Network writes are kept outside the Windows input-state lock to reduce lock-order deadlock risk.
 
-### Mac receiver
+## Compatibility
 
-Stop the old receiver with Ctrl+C, update `receiver.py` from this release if included, and restart:
+The protocol uses the existing port `24800`, token handshake, and existing input event names. Both sides should be updated together because the heartbeat ping/pong messages are part of this patch.
 
-```bash
-uv run receiver.py --token "YOUR_EXISTING_SECRET"
-```
+## Important limitations
 
-### Windows controller
+This patch has passed Python syntax compilation in the build environment, but it has **not** been runtime-tested on the user's Windows machine or Hackintosh. It cannot guarantee release of an input if the Mac OS itself or the receiver process is forcibly terminated at exactly the wrong time; it does attempt release on ordinary socket disconnect and orderly receiver cleanup.
 
-Stop the old controller. Replace `controller.py` with this release's file and run:
+## Test plan — run only after backing up the known-good files
 
-```powershell
-python controller.py --host YOUR_MAC_IP --token "YOUR_EXISTING_SECRET"
-```
+1. Start the Mac receiver, then the Windows controller.
+2. Confirm edge handoff and return work normally.
+3. While controlling the Mac, stop the receiver with Ctrl+C. Windows should regain local control after EOF/heartbeat timeout.
+4. Repeat with the network connection interrupted. For a silent network failure, recovery should occur after the 2-second heartbeat timeout (possibly slightly longer under OS scheduling).
+5. While controlling the Mac, stop the Windows controller with Ctrl+C. It should exit through normal cleanup without the prior callback `KeyboardInterrupt` message.
+6. Confirm the Mac reports the controller disconnect and releases any held keys/buttons.
 
-## Test
-
-1. Move to the far-right edge of Windows to enter Mac mode.
-2. Move the mouse physically; it should control the Mac without the Windows cursor flickering to the center.
-3. Click and type in a harmless Mac app; input should go to the Mac rather than also clicking/typing in Windows.
-4. Move inward on the Mac and then reach the Mac's left edge to return.
-5. `Ctrl + Alt + F12` is the fallback toggle.
-
-## Limitations / safety
-
-- This is still experimental. It assumes one primary Windows display and the Mac positioned to the right.
-- This prototype uses Windows low-level hooks and Windows cursor recentering; it is not a true raw-input virtual desktop and can still feel different from a native multi-monitor setup.
-- Key mapping currently handles letters, digits, common punctuation and common special keys. International layouts, some OEM keys, IME input and some key combinations need additional work.
-- If control gets stuck, press Ctrl+Alt+F12 or stop the controller with Ctrl+C.
-- The prototype is not encrypted. Use only on a trusted private LAN, use a unique token, and do not expose port 24800 to the internet.
+Do not test by force-killing either process as the first test. Keep the Mac's integrated keyboard available during initial tests.
