@@ -32,8 +32,10 @@ def send_to_controller(payload):
         data = (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8")
         with send_lock:
             conn.sendall(data)
-    except OSError:
-        pass
+        return True
+    except OSError as exc:
+        print(f"[FlowSwitch heartbeat/debug] Send failed: {exc}", flush=True)
+        return False
 
 
 def resolve_key(value):
@@ -52,7 +54,11 @@ def handle_event(event):
     kind = event.get("type")
 
     if kind == "ping":
-        send_to_controller({"type": "pong"})
+        print("[FlowSwitch heartbeat/debug] Received ping; sending pong.", flush=True)
+        if send_to_controller({"type": "pong"}):
+            print("[FlowSwitch heartbeat/debug] Pong sent.", flush=True)
+        else:
+            print("[FlowSwitch heartbeat/debug] Pong could not be sent.", flush=True)
 
     elif kind == "enter":
         with state_lock:
@@ -165,48 +171,85 @@ def client_session(conn, expected_token):
             print("Controller disconnected; released held keys/buttons.")
 
 
-def main():
-    global screen_width, screen_height
-    parser = argparse.ArgumentParser(description="FlowSwitch input receiver")
-    parser.add_argument("--host", default="0.0.0.0", help="Bind address (default: all network interfaces)")
-    parser.add_argument("--port", type=int, default=PORT)
-    parser.add_argument("--token", required=True, help="Shared secret; use a long random value")
-    args = parser.parse_args()
-    if len(args.token) < 16:
-        parser.error("Use a token at least 16 characters long.")
+def run_receiver(host="0.0.0.0", port=PORT, token="", stop_event=None, status_callback=None, screen_size=None):
+    """Run the receiver until stop_event is set or Ctrl+C is pressed."""
+    global screen_width, screen_height, active_connection, remote_mode, edge_armed
+    if len(token) < 16:
+        raise ValueError("Use a token at least 16 characters long.")
 
-    # Tk reads the Mac's actual screen dimensions without an additional dependency.
-    try:
-        import tkinter as tk
-        root = tk.Tk()
-        root.withdraw()
-        screen_width = root.winfo_screenwidth()
-        screen_height = root.winfo_screenheight()
-        root.destroy()
-    except Exception as exc:
-        raise SystemExit(f"Could not determine Mac screen size via Tk: {exc}")
+    def report(message):
+        print(message)
+        if status_callback is not None:
+            try:
+                status_callback(message)
+            except Exception:
+                pass
+
+    if screen_size is not None:
+        screen_width, screen_height = int(screen_size[0]), int(screen_size[1])
+    else:
+        try:
+            import tkinter as tk
+            root = tk.Tk()
+            root.withdraw()
+            screen_width = root.winfo_screenwidth()
+            screen_height = root.winfo_screenheight()
+            root.destroy()
+        except Exception as exc:
+            raise RuntimeError(f"Could not determine Mac screen size via Tk: {exc}")
 
     listener = mouse.Listener(on_move=on_mac_mouse_move)
     listener.start()
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind((args.host, args.port))
+    server.bind((host, port))
     server.listen(4)
-    print(f"FlowSwitch receiver listening on {args.host}:{args.port}")
-    print(f"Detected Mac display: {screen_width}x{screen_height}")
-    print("Only use this prototype on a trusted private network.")
+    server.settimeout(0.5)
+    report(f"FlowSwitch receiver listening on {host}:{port}")
+    report(f"Detected Mac display: {screen_width}x{screen_height}")
+    report("Only use this prototype on a trusted private network.")
 
     try:
-        while True:
-            conn, address = server.accept()
-            threading.Thread(target=client_session, args=(conn, args.token), daemon=True).start()
-    except KeyboardInterrupt:
-        print("\nStopping FlowSwitch receiver.")
+        while stop_event is None or not stop_event.is_set():
+            try:
+                conn, address = server.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            threading.Thread(target=client_session, args=(conn, token), daemon=True).start()
     finally:
         server.close()
-        listener.stop()
+        conn = active_connection
+        active_connection = None
+        if conn is not None:
+            try:
+                conn.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                conn.close()
+            except OSError:
+                pass
+        with state_lock:
+            remote_mode = False
+            edge_armed = False
         release_all()
+        listener.stop()
+        report("FlowSwitch receiver stopped; released held keys/buttons.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="FlowSwitch input receiver")
+    parser.add_argument("--host", default="0.0.0.0", help="Bind address (default: all network interfaces)")
+    parser.add_argument("--port", type=int, default=PORT)
+    parser.add_argument("--token", required=True, help="Shared secret; use a long random value")
+    args = parser.parse_args()
+    try:
+        run_receiver(args.host, args.port, args.token)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise SystemExit(f"FlowSwitch: {exc}")
 
 
 if __name__ == "__main__":

@@ -1,31 +1,68 @@
-# FlowSwitch v0.4 — Failsafe patch
+# FlowSwitch Desktop v0.5 — GUI starter
 
-This patch updates the Windows controller and Mac receiver to improve recovery when the TCP connection or receiver disappears.
+This is the first desktop-GUI development checkpoint based on the working v0.4 failsafe scripts. It adds a small Windows controller window and Mac receiver window. The existing input protocol remains the same; the Mac receiver now has a programmatic start/stop function for its GUI.
 
-## Safety changes
+**Important:** These are source projects, not prebuilt `.exe`/`.app` installers. Build each app on its target operating system. The current environment can check Python syntax, but cannot verify Windows low-level input hooks or macOS accessibility/input behavior. Keep the known-good v0.4 files as a fallback and test with the Mac's built-in keyboard available.
 
-- Windows input hooks no longer perform TCP writes directly. Events are queued for a dedicated socket-writer thread so a slow connection is less likely to stall a low-level input callback.
-- The Windows controller detects socket write errors, receiver EOF, and missing heartbeat replies. On connection loss it marks remote mode inactive and restores the local cursor so physical Windows input is passed through.
-- Heartbeats run every 0.5 seconds; the controller treats a missing pong for 2 seconds as a failed connection. A direct socket failure or EOF is handled sooner.
-- The Mac replies to heartbeat pings and continues releasing held keys and mouse buttons in the client-session cleanup path when the connection ends.
-- Ctrl+C posts a Windows quit message instead of raising `KeyboardInterrupt` inside a `ctypes` callback.
-- Network writes are kept outside the Windows input-state lock to reduce lock-order deadlock risk.
+## Windows controller
 
-## Compatibility
+1. Install Python 3.11+ from python.org. During setup, enable adding Python to PATH.
+2. Open PowerShell in this folder.
+3. Run `python windows_app.py`.
+4. Enter the Mac's IP address and the same shared token configured on the Mac, then select **Connect to Receiver**.
+5. Use `Ctrl+Alt+F12` to toggle control. Use **Disconnect** or close the app to return control to Windows safely.
 
-The protocol uses the existing port `24800`, token handshake, and existing input event names. Both sides should be updated together because the heartbeat ping/pong messages are part of this patch.
+Build a standalone Windows executable (run these commands on Windows):
 
-## Important limitations
+```powershell
+py -m pip install --upgrade pyinstaller
+py -m PyInstaller --noconfirm --clean --windowed --name FlowSwitch windows_app.py
+```
 
-This patch has passed Python syntax compilation in the build environment, but it has **not** been runtime-tested on the user's Windows machine or Hackintosh. It cannot guarantee release of an input if the Mac OS itself or the receiver process is forcibly terminated at exactly the wrong time; it does attempt release on ordinary socket disconnect and orderly receiver cleanup.
+The executable will be under `dist/FlowSwitch/` (or `dist/FlowSwitch.exe`, depending on PyInstaller version/options).
 
-## Test plan — run only after backing up the known-good files
+## Mac receiver
 
-1. Start the Mac receiver, then the Windows controller.
-2. Confirm edge handoff and return work normally.
-3. While controlling the Mac, stop the receiver with Ctrl+C. Windows should regain local control after EOF/heartbeat timeout.
-4. Repeat with the network connection interrupted. For a silent network failure, recovery should occur after the 2-second heartbeat timeout (possibly slightly longer under OS scheduling).
-5. While controlling the Mac, stop the Windows controller with Ctrl+C. It should exit through normal cleanup without the prior callback `KeyboardInterrupt` message.
-6. Confirm the Mac reports the controller disconnect and releases any held keys/buttons.
+1. Use a Python installation that includes Tkinter. Python.org's macOS installer is a suitable option.
+2. Open Terminal in this folder and install the dependency:
 
-Do not test by force-killing either process as the first test. Keep the Mac's integrated keyboard available during initial tests.
+```bash
+python3 -m pip install -r requirements-mac.txt
+```
+
+3. Run `python3 mac_app.py`.
+4. Copy the displayed local IP address into the Windows app. Enter the same token on both sides and press **Start Receiver**.
+5. On first use, macOS may require granting Accessibility/Input Monitoring permissions to the app or Python runtime. Approve only the permissions required for input control.
+
+Build a standalone Mac application (run these commands on macOS):
+
+```bash
+python3 -m pip install --upgrade pyinstaller
+python3 -m PyInstaller --noconfirm --clean --windowed --name FlowSwitch mac_app.py
+```
+
+The app bundle will be under `dist/FlowSwitch.app`.
+
+## Token and network safety
+
+- Use a long, unique shared token (at least 16 characters; 32 random characters is better).
+- Use only on a trusted private LAN. The current TCP protocol is not encrypted; do not port-forward TCP 24800 to the internet.
+- Both apps use TCP port 24800 by default. Allow it through the Mac firewall only on your trusted local network if prompted.
+
+## Current scope and next steps
+
+Included: launchable GUI source for each side, displayed Mac LAN IP, shared-token entry, start/connect and stop/disconnect controls, and a status line.
+
+Not included yet: custom screen-edge configuration, clipboard sync (text/images), drag-and-drop transfer, auto-reconnect, signed/notarized release packages, or polished installer/update flow. These should be added incrementally while preserving automatic local-input recovery on Windows.
+
+
+## Temporary heartbeat diagnostics (v0.5.1)
+
+This diagnostic build adds console messages to trace whether the Mac receives each ping, sends each pong, and whether Windows receives it. Launch both GUIs from Terminal/PowerShell so their console output is visible. This is for troubleshooting only; it is not a prebuilt app and is not runtime-tested on both operating systems. Do not change the timeout or disable the failsafe.
+
+
+## v0.5.2 connection-lifecycle fix
+
+The Windows GUI runs the controller in a worker thread. Python prohibits calling `signal.signal()` from a worker thread, so the previous diagnostics build could raise `ValueError` immediately after opening the socket and starting heartbeat traffic. The controller now installs the Ctrl+C handler only when running on the main thread; the GUI uses its existing safe `request_stop()` path. The Windows GUI also preserves exception text in its status line instead of immediately overwriting it with a generic stopped message.
+
+This patch is syntax-checked only. Test on Windows and macOS with the Mac's built-in keyboard available; keep the known-good v0.4 backup.

@@ -1,0 +1,2 @@
+# tkinter ships with the standard Windows Python installer.
+# The Windows controller uses only the Python standard library.
