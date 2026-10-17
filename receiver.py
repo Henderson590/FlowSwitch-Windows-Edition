@@ -7,6 +7,7 @@ import time
 from pynput import keyboard, mouse
 
 from clipboard_sync import ClipboardMonitor
+from file_transfer import FileTransferManager
 
 PORT = 24800
 MAX_LINE = 12 * 1024 * 1024
@@ -22,6 +23,9 @@ active_connection = None
 remote_mode = False
 edge_armed = False
 active_clipboard_monitor = None
+active_file_transfer_manager = None
+configured_download_dir = None
+receiver_status_callback = None
 screen_width = 0
 screen_height = 0
 
@@ -55,6 +59,10 @@ def resolve_key(value):
 def handle_event(event):
     global remote_mode, edge_armed, active_clipboard_monitor
     kind = event.get("type")
+    transfer_manager = active_file_transfer_manager
+    if transfer_manager is not None and kind and kind.startswith("file_"):
+        if transfer_manager.handle_message(event):
+            return
 
     if kind == "ping":
         send_to_controller({"type": "pong"})
@@ -145,7 +153,7 @@ def on_mac_mouse_move(x, y):
 
 
 def client_session(conn, expected_token):
-    global active_connection, remote_mode, edge_armed, active_clipboard_monitor
+    global active_connection, remote_mode, edge_armed, active_clipboard_monitor, active_file_transfer_manager
     with conn:
         file = conn.makefile("r", encoding="utf-8", newline="\n")
         try:
@@ -167,6 +175,12 @@ def client_session(conn, expected_token):
             clipboard_stop = threading.Event()
             clipboard_monitor = ClipboardMonitor(send_to_controller, clipboard_stop)
             active_clipboard_monitor = clipboard_monitor
+            file_transfer_manager = FileTransferManager(
+                send_to_controller,
+                download_dir=configured_download_dir,
+                status_callback=receiver_status_callback,
+            )
+            active_file_transfer_manager = file_transfer_manager
             threading.Thread(
                 target=clipboard_monitor.run, daemon=True, name="FlowSwitchClipboardMonitor"
             ).start()
@@ -188,6 +202,8 @@ def client_session(conn, expected_token):
                 clipboard_stop.set()
             if active_clipboard_monitor is locals().get("clipboard_monitor"):
                 active_clipboard_monitor = None
+            if active_file_transfer_manager is locals().get("file_transfer_manager"):
+                active_file_transfer_manager = None
             with state_lock:
                 remote_mode = False
                 edge_armed = False
@@ -197,11 +213,21 @@ def client_session(conn, expected_token):
             print("Controller disconnected; released held keys/buttons.")
 
 
-def run_receiver(host="0.0.0.0", port=PORT, token="", stop_event=None, status_callback=None, screen_size=None):
+def send_files_to_controller(paths):
+    manager = active_file_transfer_manager
+    if manager is None:
+        return False
+    manager.send_files(paths)
+    return True
+
+
+def run_receiver(host="0.0.0.0", port=PORT, token="", stop_event=None, status_callback=None, screen_size=None, download_dir=None):
     """Run the receiver until stop_event is set or Ctrl+C is pressed."""
-    global screen_width, screen_height, active_connection, remote_mode, edge_armed
+    global screen_width, screen_height, active_connection, remote_mode, edge_armed, configured_download_dir, receiver_status_callback
     if len(token) < 16:
         raise ValueError("Use a token at least 16 characters long.")
+    configured_download_dir = download_dir
+    receiver_status_callback = status_callback
 
     def report(message):
         print(message)

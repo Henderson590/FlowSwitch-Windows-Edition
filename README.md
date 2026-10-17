@@ -116,3 +116,11 @@ python3 -m pip install -r requirements-mac.txt
 ```
 
 Restart both apps after installing dependencies. This remains a source build; no prebuilt `.exe` or `.app` is included.
+
+## v0.7.0 — bidirectional file transfer
+
+Adds a **Send File(s)…** button to both desktop windows. Select one or more files to send them to the connected computer. Incoming files are saved to the configured destination folder (Downloads by default); use **Choose Save Folder…** on Windows or **Browse…** on Mac to change it. Existing filenames are preserved by saving duplicates as `name (1).ext`, etc. Transfers use acknowledged chunks, so a whole file is not loaded into memory at once. The per-file limit is 2 GiB. Temporary partial files are used and renamed into place only after a complete transfer.
+
+Both computers must use the v0.7.0 source folder for file transfer. The feature uses the existing authenticated TCP connection and protocol; it does not require cloud services or another port. The protocol remains unencrypted, so use FlowSwitch only on a trusted private LAN and never port-forward port 24800 to the internet. Only send files to a computer you trust. No drag-and-drop support yet; the first version uses the Send File(s)… file picker.
+
+This version is syntax-checked and its chunked transfer protocol was exercised using paired in-process transfer managers, including a multi-chunk file and filename collision handling. Actual end-to-end file transfer between physical Windows and macOS machines still needs user testing.

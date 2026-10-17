@@ -10,6 +10,7 @@ import time
 from ctypes import wintypes
 
 from clipboard_sync import ClipboardMonitor
+from file_transfer import FileTransferManager
 
 PORT = 24800
 
@@ -226,6 +227,7 @@ class FlowSwitchController:
         self.connection_dead = False
         self.last_pong = time.monotonic()
         self.clipboard_monitor = ClipboardMonitor(self.send, self.shutdown_event)
+        self.file_transfer = FileTransferManager(self.send, status_callback=self.status_callback)
 
         self.active = False
         self.last_toggle = 0.0
@@ -627,6 +629,8 @@ class FlowSwitchController:
                         daemon=True,
                         name="FlowSwitchRemoteImageApply",
                     ).start()
+                elif kind and kind.startswith("file_"):
+                    self.file_transfer.handle_message(message)
         except (OSError, ValueError) as exc:
             if not self.shutdown_event.is_set():
                 self.connection_lost(f"receiver read failed: {exc}")
