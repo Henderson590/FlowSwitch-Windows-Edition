@@ -1,2 +1,4 @@
 # tkinter ships with the standard Windows Python installer.
-# The Windows controller uses only the Python standard library.
+# Pillow reads and encodes clipboard images.
+Pillow>=10.0,<13
+pynput>=1.7.7,<2

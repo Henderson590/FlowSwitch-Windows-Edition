@@ -9,7 +9,7 @@ from pynput import keyboard, mouse
 from clipboard_sync import ClipboardMonitor
 
 PORT = 24800
-MAX_LINE = 512_000
+MAX_LINE = 12 * 1024 * 1024
 EDGE_TOLERANCE = 2
 
 mouse_controller = mouse.Controller()
@@ -63,6 +63,18 @@ def handle_event(event):
         monitor = active_clipboard_monitor
         if monitor is not None:
             monitor.apply_remote_text(event.get("text"))
+
+    elif kind == "clipboard_image":
+        monitor = active_clipboard_monitor
+        if monitor is not None:
+            # Keep image decoding/clipboard writes off the socket reader so
+            # heartbeat pings can still be answered promptly.
+            threading.Thread(
+                target=monitor.apply_remote_image,
+                args=(event.get("data"),),
+                daemon=True,
+                name="FlowSwitchRemoteImageApply",
+            ).start()
 
     elif kind == "enter":
         with state_lock:

@@ -53,7 +53,7 @@ The app bundle will be under `dist/FlowSwitch.app`.
 
 Included: launchable GUI source for each side, displayed Mac LAN IP, shared-token entry, start/connect and stop/disconnect controls, and a status line.
 
-Not included yet: custom screen-edge configuration, clipboard sync (text/images), drag-and-drop transfer, auto-reconnect, signed/notarized release packages, or polished installer/update flow. These should be added incrementally while preserving automatic local-input recovery on Windows.
+Not included yet: custom screen-edge configuration, drag-and-drop transfer, auto-reconnect, signed/notarized release packages, or polished installer/update flow. These should be added incrementally while preserving automatic local-input recovery on Windows.
 
 
 ## Temporary heartbeat diagnostics (v0.5.1)
@@ -69,15 +69,15 @@ This patch is syntax-checked only. Test on Windows and macOS with the Mac's buil
 
 ## v0.6.0 — plain-text clipboard sync (first implementation)
 
-This version adds bidirectional plain-text clipboard synchronization. Copy text, code, or a link on either computer; after the next clipboard poll (normally within about half a second), the other computer's clipboard is updated. It supports up to 32,000 characters per clipboard item. Images and rich formatting are not included yet.
+The original v0.6.0 release added bidirectional plain-text clipboard synchronization. Copy text, code, links, or an image on either computer; after the next clipboard poll (normally within about half a second), the other computer's clipboard is updated. Text is limited to 32,000 characters and images to 8 MiB of PNG data before network encoding. Rich formatting is not preserved.
 
-**Update both computers together:** the v0.6.0 protocol adds a `clipboard_text` message, so use this version's `windows_app.py`, `controller.py`, `clipboard_sync.py`, `receiver.py`, and `mac_app.py` on the matching machines. Do not mix this with the older receiver if you expect clipboard sync to work.
+**Update both computers together:** the v0.6.x protocol uses `clipboard_text` and `clipboard_image` messages, so use the matching source files on both machines. Do not mix this with the older receiver if you expect clipboard sync to work.
 
 Clipboard behavior:
 - The apps establish a baseline when a connection starts, so neither clipboard is automatically overwritten just because you connected.
 - Only clipboard changes after connection are synchronized.
 - Remote clipboard updates are marked as already seen to prevent an endless echo loop.
-- Windows uses the native Unicode text clipboard API. macOS uses the built-in `pbpaste` and `pbcopy` utilities.
+- Windows uses the native Unicode text clipboard API and Pillow for image conversion through the Windows DIB clipboard format. macOS uses `pbpaste`/`pbcopy` for text and native NSPasteboard TIFF data for images (through PyObjC).
 - Clipboard polling runs in a separate daemon thread and is designed not to interfere with input forwarding or the Windows failsafe.
 - The protocol is still unencrypted. Keep it on a trusted private network and do not forward port 24800 to the internet.
 
@@ -89,6 +89,30 @@ Clipboard behavior:
 4. Copy a short plain-text sentence on Windows, wait about one second, and paste on the Mac.
 5. Copy a URL and a multi-line code snippet on the Mac, then paste on Windows.
 6. Verify switching input in both directions and the emergency toggle still work.
-7. Disconnect the Mac receiver while Windows is controlling it and confirm Windows input immediately returns locally.
+7. Copy an image on Windows and paste it into an image editor or message on the Mac.
+8. Copy an image on the Mac and paste it into an image editor or message on Windows.
+9. Test a large image, then test text sharing again in both directions.
+10. Disconnect the Mac receiver while Windows is controlling it and confirm Windows input immediately returns locally.
 
-This source was syntax-checked and the clipboard monitor's echo-prevention logic was tested with mocked clipboard functions. It has **not** been runtime-tested on actual Windows and macOS machines in this environment. Treat this as a test build until you complete the checklist on your hardware. Image clipboard support is a later milestone.
+This source is syntax-checked, but native clipboard image access has **not** been runtime-tested on actual Windows and macOS machines in this environment. Treat it as a test build until you complete the checklist on your hardware. Images are sent as base64-encoded PNG inside the existing newline-delimited JSON protocol, with the receiver's maximum message size increased to 12 MiB to accommodate the 8 MiB image limit. The protocol is still unencrypted, so use only on a trusted private LAN.
+
+
+## v0.6.1 — image clipboard sync
+
+Adds bidirectional image clipboard synchronization. The monitor checks for images before text so image clipboard formats are not accidentally treated as text. Images are normalized to PNG, limited to 8 MiB, and transferred with a `clipboard_image` message. Both machines must run this version and install their listed dependencies.
+
+### Dependencies for v0.6.1
+
+On Windows, open PowerShell in the extracted folder and run:
+
+```powershell
+py -m pip install -r requirements-windows.txt
+```
+
+On macOS, run in Terminal from the extracted folder:
+
+```bash
+python3 -m pip install -r requirements-mac.txt
+```
+
+Restart both apps after installing dependencies. This remains a source build; no prebuilt `.exe` or `.app` is included.

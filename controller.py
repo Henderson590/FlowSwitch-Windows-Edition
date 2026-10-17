@@ -618,6 +618,15 @@ class FlowSwitchController:
                     self.last_pong = time.monotonic()
                 elif kind == "clipboard_text":
                     self.clipboard_monitor.apply_remote_text(message.get("text"))
+                elif kind == "clipboard_image":
+                    # Image decoding/clipboard writes can be slow; keep the socket
+                    # reader free to process heartbeat pongs and protect the failsafe.
+                    threading.Thread(
+                        target=self.clipboard_monitor.apply_remote_image,
+                        args=(message.get("data"),),
+                        daemon=True,
+                        name="FlowSwitchRemoteImageApply",
+                    ).start()
         except (OSError, ValueError) as exc:
             if not self.shutdown_event.is_set():
                 self.connection_lost(f"receiver read failed: {exc}")
