@@ -6,8 +6,10 @@ import threading
 import time
 from pynput import keyboard, mouse
 
+from clipboard_sync import ClipboardMonitor
+
 PORT = 24800
-MAX_LINE = 8192
+MAX_LINE = 512_000
 EDGE_TOLERANCE = 2
 
 mouse_controller = mouse.Controller()
@@ -19,6 +21,7 @@ send_lock = threading.Lock()
 active_connection = None
 remote_mode = False
 edge_armed = False
+active_clipboard_monitor = None
 screen_width = 0
 screen_height = 0
 
@@ -50,15 +53,16 @@ def resolve_key(value):
 
 
 def handle_event(event):
-    global remote_mode, edge_armed
+    global remote_mode, edge_armed, active_clipboard_monitor
     kind = event.get("type")
 
     if kind == "ping":
-        print("[FlowSwitch heartbeat/debug] Received ping; sending pong.", flush=True)
-        if send_to_controller({"type": "pong"}):
-            print("[FlowSwitch heartbeat/debug] Pong sent.", flush=True)
-        else:
-            print("[FlowSwitch heartbeat/debug] Pong could not be sent.", flush=True)
+        send_to_controller({"type": "pong"})
+
+    elif kind == "clipboard_text":
+        monitor = active_clipboard_monitor
+        if monitor is not None:
+            monitor.apply_remote_text(event.get("text"))
 
     elif kind == "enter":
         with state_lock:
@@ -129,7 +133,7 @@ def on_mac_mouse_move(x, y):
 
 
 def client_session(conn, expected_token):
-    global active_connection, remote_mode, edge_armed
+    global active_connection, remote_mode, edge_armed, active_clipboard_monitor
     with conn:
         file = conn.makefile("r", encoding="utf-8", newline="\n")
         try:
@@ -148,6 +152,12 @@ def client_session(conn, expected_token):
 
             active_connection = conn
             conn.sendall(b'{"type":"ok"}\n')
+            clipboard_stop = threading.Event()
+            clipboard_monitor = ClipboardMonitor(send_to_controller, clipboard_stop)
+            active_clipboard_monitor = clipboard_monitor
+            threading.Thread(
+                target=clipboard_monitor.run, daemon=True, name="FlowSwitchClipboardMonitor"
+            ).start()
             print(f"Controller connected from {conn.getpeername()}")
 
             for line in file:
@@ -162,6 +172,10 @@ def client_session(conn, expected_token):
         except (ConnectionError, OSError) as exc:
             print(f"Connection ended: {exc}")
         finally:
+            if "clipboard_stop" in locals():
+                clipboard_stop.set()
+            if active_clipboard_monitor is locals().get("clipboard_monitor"):
+                active_clipboard_monitor = None
             with state_lock:
                 remote_mode = False
                 edge_armed = False

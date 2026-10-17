@@ -9,6 +9,8 @@ import threading
 import time
 from ctypes import wintypes
 
+from clipboard_sync import ClipboardMonitor
+
 PORT = 24800
 
 WM_MOUSEMOVE = 0x0200
@@ -223,6 +225,7 @@ class FlowSwitchController:
         self.shutdown_event = threading.Event()
         self.connection_dead = False
         self.last_pong = time.monotonic()
+        self.clipboard_monitor = ClipboardMonitor(self.send, self.shutdown_event)
 
         self.active = False
         self.last_toggle = 0.0
@@ -613,6 +616,8 @@ class FlowSwitchController:
                     self.set_active(False)
                 elif kind == "pong":
                     self.last_pong = time.monotonic()
+                elif kind == "clipboard_text":
+                    self.clipboard_monitor.apply_remote_text(message.get("text"))
         except (OSError, ValueError) as exc:
             if not self.shutdown_event.is_set():
                 self.connection_lost(f"receiver read failed: {exc}")
@@ -683,6 +688,11 @@ class FlowSwitchController:
             args=(file,),
             daemon=True,
             name="FlowSwitchReceiverReader",
+        ).start()
+        threading.Thread(
+            target=self.clipboard_monitor.run,
+            daemon=True,
+            name="FlowSwitchClipboardMonitor",
         ).start()
         threading.Thread(
             target=self._heartbeat_loop,

@@ -66,3 +66,29 @@ This diagnostic build adds console messages to trace whether the Mac receives ea
 The Windows GUI runs the controller in a worker thread. Python prohibits calling `signal.signal()` from a worker thread, so the previous diagnostics build could raise `ValueError` immediately after opening the socket and starting heartbeat traffic. The controller now installs the Ctrl+C handler only when running on the main thread; the GUI uses its existing safe `request_stop()` path. The Windows GUI also preserves exception text in its status line instead of immediately overwriting it with a generic stopped message.
 
 This patch is syntax-checked only. Test on Windows and macOS with the Mac's built-in keyboard available; keep the known-good v0.4 backup.
+
+## v0.6.0 — plain-text clipboard sync (first implementation)
+
+This version adds bidirectional plain-text clipboard synchronization. Copy text, code, or a link on either computer; after the next clipboard poll (normally within about half a second), the other computer's clipboard is updated. It supports up to 32,000 characters per clipboard item. Images and rich formatting are not included yet.
+
+**Update both computers together:** the v0.6.0 protocol adds a `clipboard_text` message, so use this version's `windows_app.py`, `controller.py`, `clipboard_sync.py`, `receiver.py`, and `mac_app.py` on the matching machines. Do not mix this with the older receiver if you expect clipboard sync to work.
+
+Clipboard behavior:
+- The apps establish a baseline when a connection starts, so neither clipboard is automatically overwritten just because you connected.
+- Only clipboard changes after connection are synchronized.
+- Remote clipboard updates are marked as already seen to prevent an endless echo loop.
+- Windows uses the native Unicode text clipboard API. macOS uses the built-in `pbpaste` and `pbcopy` utilities.
+- Clipboard polling runs in a separate daemon thread and is designed not to interfere with input forwarding or the Windows failsafe.
+- The protocol is still unencrypted. Keep it on a trusted private network and do not forward port 24800 to the internet.
+
+### Test checklist
+
+1. Keep the known-good v0.5.2 folder/ZIP as your rollback checkpoint.
+2. Extract this version into a new folder on both computers; do not overwrite the working backup.
+3. Start the new Mac receiver and new Windows controller with the same IP/token as before.
+4. Copy a short plain-text sentence on Windows, wait about one second, and paste on the Mac.
+5. Copy a URL and a multi-line code snippet on the Mac, then paste on Windows.
+6. Verify switching input in both directions and the emergency toggle still work.
+7. Disconnect the Mac receiver while Windows is controlling it and confirm Windows input immediately returns locally.
+
+This source was syntax-checked and the clipboard monitor's echo-prevention logic was tested with mocked clipboard functions. It has **not** been runtime-tested on actual Windows and macOS machines in this environment. Treat this as a test build until you complete the checklist on your hardware. Image clipboard support is a later milestone.
