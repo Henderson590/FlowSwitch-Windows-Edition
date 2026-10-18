@@ -138,3 +138,21 @@ Install the updated platform requirements on both computers so `tkinterdnd2` is 
 Some macOS Python 3.14 installations use a Tcl/Tk runtime that is incompatible with the native extension bundled by `tkinterdnd2` (error text may say the extension was compiled for Tcl 8.x). The GUI now catches that startup failure and falls back to standard Tk so FlowSwitch still opens and the **Send File(s)…** picker remains usable. In this fallback mode, drag-and-drop into the app is disabled.
 
 To use app-window drag-and-drop, use a compatible Python distribution with Tcl/Tk 8.6; Python 3.12 from python.org is the recommended first option to try on macOS. Create a fresh virtual environment with that interpreter, install `requirements-mac.txt`, and launch `mac_app.py` from the new environment. Python 3.14 compatibility with `tkinterdnd2` depends on the Tcl/Tk build and is not guaranteed.
+
+## v0.8.0 GUI refresh
+
+This build refreshes the Windows and macOS application layouts while preserving the existing connection, clipboard synchronization, file-transfer, drag-and-drop, and failsafe code paths. Windows uses a dark, high-contrast interface; macOS keeps native Aqua controls where available with a light, Mac-style layout. No cross-screen drag-and-drop is included in this version.
+
+Recommended Mac runtime for app drag-and-drop: Python 3.12.11 with Tcl/Tk 8.6, using the working virtual environment described in the previous setup notes.
+
+## v0.8.1 visual refinement
+- Added a light/dark theme toggle to both desktop GUIs.
+- Added a prominent green CONNECTED / red DISCONNECTED indicator near the title.
+- Simplified connection status copy to avoid verbose input-handoff messages in the GUI.
+- Kept the existing connection, clipboard, file-transfer, and drag-and-drop code paths.
+- Theme preference is currently per-launch (not persisted between launches).
+- UI source syntax-checked; please test on the actual Windows and macOS machines before replacing your known-good build.
+
+## v0.8.2 mockup-matched UI
+
+This build updates both apps to match the supplied mockups more closely: centered FlowSwitch and platform titles, a monitor illustration, the same overall control arrangement, a green/red connection indicator, a theme toggle on both platforms, and a concise status line at the bottom below file-transfer controls. The Windows and Mac apps both support light and dark themes. Connection handoff narration is not displayed in the status area. Theme changes are immediate with a sun/moon icon change; no claim of a full animated transition is made.
